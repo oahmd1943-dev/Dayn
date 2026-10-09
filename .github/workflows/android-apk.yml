@@ -1,0 +1,209 @@
+name: Build Signed APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+env:
+  PWA_ANDROID_PACKAGE_ID: ${{ vars.PWA_ANDROID_PACKAGE_ID || 'com.yam.debtapp' }}
+  PWA_ANDROID_SHA256_FINGERPRINTS: ${{ vars.PWA_ANDROID_SHA256_FINGERPRINTS || 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD' }}
+  RASID_BUILD_DIR: ${{ vars.RASID_BUILD_DIR || 'dist' }}
+  RASID_PROJECT_ROOT: ${{ vars.RASID_PROJECT_ROOT || '.' }}
+  RASID_SIGNING_MODE: ${{ vars.RASID_SIGNING_MODE || 'release' }}
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Install Capacitor tools
+        run: npm install --no-save @capacitor/cli @capacitor/core @capacitor/android
+
+      - name: Init Capacitor and add Android platform
+        run: |
+          npx cap init "ديوني" "com.yam.debtapp" --web-dir="dist"
+          npx cap add android
+
+      - name: Set namespace in all build.gradle files
+        run: |
+          NAMESPACE="$PWA_ANDROID_PACKAGE_ID"
+          NAMESPACE=$(echo "$NAMESPACE" | tr -d '"')
+
+          # 1. Main app module
+          if grep -q "namespace" android/app/build.gradle; then
+            sed -i "s/namespace \".*\"/namespace \"$NAMESPACE\"/" android/app/build.gradle
+          else
+            sed -i "s/android {/android {\n    namespace \"$NAMESPACE\"/" android/app/build.gradle
+          fi
+
+          # 2. All library modules
+          find android -name "build.gradle" -type f | while read file; do
+            if grep -q "android {" "$file"; then
+              if ! grep -q "namespace" "$file"; then
+                PKG=$(echo "$NAMESPACE" | sed "s/\.app$//")
+                LIB_NAME=$(basename "$(dirname "$(dirname "$file")")" | tr '-' '_')
+                sed -i "s/android {/android {\n    namespace \"$PKG.$LIB_NAME\"/" "$file"
+              fi
+            fi
+          done
+
+          # 3. Verify output
+          echo "=== Namespace added ==="
+          grep -rn "namespace" android/ | head -30
+
+      - name: Set namespace via gradle.properties
+        run: |
+          NAMESPACE="$PWA_ANDROID_PACKAGE_ID"
+          NAMESPACE=$(echo "$NAMESPACE" | tr -d '"')
+          echo "android.namespace=$NAMESPACE" >> android/gradle.properties
+          echo "android.library.namespace=$NAMESPACE" >> android/gradle.properties
+
+      - name: Set Android SDK versions
+        run: |
+          VARS_FILE="android/variables.gradle"
+          if [ -f "$VARS_FILE" ]; then
+            sed -i 's/minSdkVersion = .*/minSdkVersion = 24/' "$VARS_FILE"
+            sed -i 's/targetSdkVersion = .*/targetSdkVersion = 35/' "$VARS_FILE"
+            grep -n "minSdkVersion\|targetSdkVersion" "$VARS_FILE"
+          fi
+
+      - name: Add Android permissions
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          add_perm() {
+            local token="$1"
+            local xml="$2"
+            if ! grep -q "$token" "$MANIFEST"; then
+              sed -i "/<manifest/a\    $xml" "$MANIFEST"
+            fi
+          }
+
+          add_perm "android.permission.READ_EXTERNAL_STORAGE" "<uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" />"
+          add_perm "android.permission.WRITE_EXTERNAL_STORAGE" "<uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />"
+          add_perm "android.permission.POST_NOTIFICATIONS" "<uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />"
+          add_perm "android.permission.SCHEDULE_EXACT_ALARM" "<uses-permission android:name=\"android.permission.SCHEDULE_EXACT_ALARM\" />"
+          add_perm "android.permission.USE_EXACT_ALARM" "<uses-permission android:name=\"android.permission.USE_EXACT_ALARM\" />"
+
+      - name: Sync built web assets to Android
+        run: npx cap sync android
+
+      - name: Set Android app name
+        run: |
+          STRINGS_FILE="android/app/src/main/res/values/strings.xml"
+          sed -i 's#<string name="app_name">.*</string>#<string name="app_name">ديوني</string>#g' "$STRINGS_FILE"
+
+      - name: Apply launcher icon from yam-icon.png
+        run: |
+          ICON_SOURCE="public/yam-icon.png"
+          if [ ! -f "$ICON_SOURCE" ]; then
+            echo "Icon file $ICON_SOURCE not found."
+            exit 1
+          fi
+
+          for pair in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+            density=$(echo "$pair" | cut -d' ' -f1)
+            size=$(echo "$pair" | cut -d' ' -f2)
+            out_dir="android/app/src/main/res/mipmap-$density"
+            mkdir -p "$out_dir"
+            convert "$ICON_SOURCE" -resize "${size}x${size}" "$out_dir/ic_launcher.png"
+            cp "$out_dir/ic_launcher.png" "$out_dir/ic_launcher_round.png"
+          done
+
+      - name: Build unsigned release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease
+
+      - name: Prepare signing keystore
+        id: signing
+        shell: bash
+        run: |
+          set -e
+          mkdir -p android/signing
+
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "Using repository signing secrets."
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/signing/release.keystore
+            echo "store_password=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_OUTPUT
+            echo "key_alias=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_OUTPUT
+            echo "key_password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_OUTPUT
+          else
+            echo "No signing secrets found. Generating CI fallback keystore."
+            keytool -genkeypair -v \
+              -storetype JKS \
+              -keystore android/signing/release.keystore \
+              -alias yam \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=YAM, OU=Mobile, O=YAM, L=NA, S=NA, C=US"
+
+            echo "store_password=android" >> $GITHUB_OUTPUT
+            echo "key_alias=yam" >> $GITHUB_OUTPUT
+            echo "key_password=android" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sign release APK
+        run: |
+          set -e
+          BUILD_TOOLS=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+
+          UNSIGNED_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED_APK="android/app/build/outputs/apk/release/app-release-aligned.apk"
+          SIGNED_APK="android/app/build/outputs/apk/release/YAM-release-signed.apk"
+
+          "$ZIPALIGN" -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+
+          "$APKSIGNER" sign \
+            --ks android/signing/release.keystore \
+            --ks-pass pass:${{ steps.signing.outputs.store_password }} \
+            --ks-key-alias ${{ steps.signing.outputs.key_alias }} \
+            --key-pass pass:${{ steps.signing.outputs.key_password }} \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+
+          "$APKSIGNER" verify "$SIGNED_APK"
+
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAM-signed-release-apk
+          path: android/app/build/outputs/apk/release/YAM-release-signed.apk
+          if-no-files-found: error
+
+      - name: Job summary
+        run: |
+          echo "Signed APK ready as GitHub Artifact: YAM-signed-release-apk" >> $GITHUB_STEP_SUMMARY
+          echo "Package ID: $PWA_ANDROID_PACKAGE_ID" >> $GITHUB_STEP_SUMMARY
+          echo "Signing mode: $RASID_SIGNING_MODE" >> $GITHUB_STEP_SUMMARY
