@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b0b16" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta
+      name="description"
+      content="وائل السريع — لعبة سباق موتورات 8-bit بكسل آرت، اجتز الطريق واصل لخط النهاية قبل انتهاء الوقت!"
+    />
+    <title>وائل السريع — سباق الموتورات 8-bit</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #07070f;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        font-family: Tahoma, system-ui, sans-serif;
+        color: #ffd24a;
+        background: radial-gradient(circle at 50% 30%, #1a1a3a, #05050c 70%);
+        text-shadow: 2px 2px 0 #000;
+        z-index: 50;
+      }
+      #boot h1 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 900;
+        letter-spacing: 1px;
+      }
+      #boot .bar {
+        width: 130px;
+        height: 10px;
+        background: #22223c;
+        box-shadow: 0 0 0 2px #000;
+        overflow: hidden;
+      }
+      #boot .bar span {
+        display: block;
+        height: 100%;
+        width: 40%;
+        background: #e03535;
+        animation: boot 1s linear infinite;
+      }
+      @keyframes boot {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(350%);
+        }
+      }
+      #boot small {
+        color: #7d7da8;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot">
+      <h1>وائل السريع</h1>
+      <div class="bar"><span></span></div>
+      <small>جارِ تحميل الحلبة…</small>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      window.addEventListener("load", function () {
+        var b = document.getElementById("boot");
+        if (b) setTimeout(function () { b.remove(); }, 250);
+      });
+    </script>
+  </body>
+</html>
